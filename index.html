@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Irrigation Hero</title>
+    <style>
+        body { font-family: 'Arial Black', sans-serif; background-color: #a2d2ff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; overflow: hidden; }
+        #game-container { display: flex; border: 8px solid #6f4e37; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); background-color: #f5deb3; }
+        #game-canvas { 
+            background: linear-gradient(to bottom, #87ceeb 0%, #98fb98 60%, #8b4513 100%); 
+            border-top-left-radius: 6px; 
+            border-bottom-left-radius: 6px; 
+            cursor: none;
+            border: 3px solid #2c1810;
+            box-shadow: inset 0 0 15px rgba(0,0,0,0.3);
+        }
+        #ui-panel { width: 200px; padding: 20px; text-align: center; display: flex; flex-direction: column; color: #4a2e2a; }
+        h2 { margin-top: 0; }
+        #water-meter-container { width: 80%; height: 300px; background-color: #c2a177; border: 3px solid #654321; margin: 20px auto; position: relative; border-radius: 5px; overflow: hidden; box-shadow: inset 0 0 10px rgba(0,0,0,0.2); }
+        #water-level-bar { width: 100%; height: 0%; background: linear-gradient(to top, #1e90ff, #87ceeb); position: absolute; bottom: 0; transition: height 0.5s ease, background 0.5s ease; }
+        #healthy-zone { position: absolute; bottom: 35%; width: 100%; height: 30%; background-color: rgba(0, 255, 0, 0.2); border-top: 2px dashed #3cb371; border-bottom: 2px dashed #3cb371; }
+        button { padding: 12px 20px; font-size: 16px; font-weight: bold; cursor: pointer; border-radius: 8px; border: 2px solid #654321; background-color: #d2b48c; margin-top: 10px; transition: transform 0.1s ease, box-shadow 0.1s ease; box-shadow: 0 4px #9c7b60; }
+        button:hover { background-color: #c2a177; }
+        button:active { transform: translateY(2px); box-shadow: 0 2px #9c7b60; }
+        button:disabled { background-color: #999; cursor: not-allowed; box-shadow: 0 4px #666; }
+        #message-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); display: flex; justify-content: center; align-items: center; z-index: 100; }
+        #message-box { background: white; padding: 30px 40px; border-radius: 10px; text-align: center; border: 5px solid #8B4513; box-shadow: 0 0 25px rgba(0,0,0,0.5); }
+        .hidden { display: none !important; }
+        #instructions { font-size: 12px; color: #654321; margin: 10px 0; }
+        #loading-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #a2d2ff; z-index: 200; display: flex; justify-content: center; align-items: center; color: #4a2e2a; font-size: 24px; }
+    </style>
+</head>
+<body>
+    <div id="loading-screen"><p>Loading Game Assets...</p></div>
+    <div id="game-container" class="hidden">
+        <canvas id="game-canvas"></canvas>
+        <div id="ui-panel">
+            <div id="game-ui">
+                <h2>Water Meter</h2>
+                <div id="water-meter-container"><div id="healthy-zone"></div><div id="water-level-bar"></div></div>
+                <p>Goal: Fill to the green zone!</p>
+                <div id="instructions">
+                    <strong>How to play:</strong><br>
+                    1. Move the yellow circle and <strong style="color: #d9534f;">click</strong> to dig<br>
+                    2. Create a path to the plant<br>
+                    3. Start water flow<br>
+                    <em>DIRT = Brown blocks (diggable)</em><br>
+                    <em>ROCK = Gray blocks (solid)</em>
+                </div>
+                <button id="start-button">Start Water Flow</button>
+                <button id="reset-button">Reset Level</button>
+            </div>
+        </div>
+    </div>
+    <div id="message-container" class="hidden">
+        <div id="message-box"><h2 id="message-title"></h2><p id="message-text"></p><button id="next-level-button">Play Again</button></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const { Engine, Render, Runner, Bodies, Composite, Events, Query, Body } = Matter;
+
+            const imageAssets = {
+                plant_pot: 'plant_pot.png',
+                plant_healthy: 'plant_healthy.png',
+                plant_wilting: 'plant_wilting.png',
+                plant_drowning: 'plant_drowning.png',
+                plant_stem: 'plant_stem.png',
+                dirt_block: 'dirt_block.png',
+                rock_block: 'rock_block.png',
+                faucet: 'faucet.png'
+            };
+            
+            const loadedImages = {};
+
+            const canvas = document.getElementById('game-canvas');
+            const startButton = document.getElementById('start-button');
+            const resetButton = document.getElementById('reset-button');
+            const waterLevelBar = document.getElementById('water-level-bar');
+            const messageContainer = document.getElementById('message-container');
+            const messageTitle = document.getElementById('message-title');
+            const messageText = document.getElementById('message-text');
+            const nextLevelButton = document.getElementById('next-level-button');
+            const loadingScreen = document.getElementById('loading-screen');
+            const gameContainer = document.getElementById('game-container');
+
+            const GAME_WIDTH = 840;
+            const GAME_HEIGHT = 600;
+            const DIRT_BLOCK_SIZE = 40;
+            const WATER_GOAL_MIN = 35, WATER_GOAL_MAX = 65, OVERWATER_LIMIT = 90;
+            const TOTAL_WATER_PARTICLES = 2500;
+
+            let engine, render, runner;
+            let dirtBlocks = [], waterInPot = 0, waterParticles = [];
+            let isWaterFlowing = false, gameEnded = false;
+            let waterInterval, plant, digCursor;
+            let faucetStopTimeout;
+
+            function preloadImages(callback) {
+                let imagesToLoad = Object.keys(imageAssets).length;
+                let imagesLoadedCount = 0;
+                if (imagesToLoad === 0) { callback(); return; }
+
+                for (const key in imageAssets) {
+                    const img = new Image();
+                    img.src = imageAssets[key];
+                    img.onload = () => {
+                        loadedImages[key] = { width: img.naturalWidth, height: img.naturalHeight };
+                        imagesLoadedCount++;
+                        if (imagesLoadedCount === imagesToLoad) callback();
+                    };
+                    img.onerror = () => {
+                        console.error(`FAILED TO LOAD IMAGE: ${imageAssets[key]}.`);
+                        loadedImages[key] = null;
+                        imagesLoadedCount++;
+                        if (imagesLoadedCount === imagesToLoad) callback();
+                    };
+                }
+            }
+            
+            function getSpriteScale(imageKey, bodyWidth, bodyHeight) {
+                const imgData = loadedImages[imageKey];
+                if (imgData && imgData.width > 0) {
+                    return { x: bodyWidth / imgData.width, y: bodyHeight / imgData.height };
+                }
+                return { x: 0, y: 0 };
+            }
+
+            function setup() {
+                loadingScreen.classList.add('hidden');
+                gameContainer.classList.remove('hidden');
+
+                engine = Engine.create();
+                engine.world.gravity.x = 0.08; 
+                engine.world.gravity.y = 0.8; 
+                
+                render = Render.create({ canvas: canvas, engine: engine, options: { width: GAME_WIDTH, height: GAME_HEIGHT, wireframes: false, background: 'transparent' } });
+                runner = Runner.create();
+                Runner.run(runner, engine);
+                Render.run(render);
+                
+                digCursor = Bodies.circle(-100, -100, DIRT_BLOCK_SIZE * 0.5, {
+                    isStatic: true,
+                    isSensor: true,
+                    render: { visible: false }
+                });
+                Composite.add(engine.world, digCursor);
+
+                canvas.addEventListener('mousemove', (event) => {
+                    if (digCursor) Body.setPosition(digCursor, { x: event.offsetX, y: event.offsetY });
+                });
+                canvas.addEventListener('mousedown', handleClick);
+                canvas.addEventListener('mouseleave', () => {
+                    if (digCursor) Body.setPosition(digCursor, { x: -100, y: -100 });
+                });
+
+                Events.on(render, 'afterRender', () => {
+                    const context = render.context;
+                    const pos = digCursor.position;
+                    if (pos.x < 0) return;
+                    
+                    context.beginPath();
+                    context.arc(pos.x, pos.y, DIRT_BLOCK_SIZE * 0.5, 0, 2 * Math.PI);
+                    context.fillStyle = 'rgba(255, 255, 0, 0.5)';
+                    context.fill();
+                    context.lineWidth = 2;
+                    context.strokeStyle = 'white';
+                    context.stroke();
+                });
+
+                Events.on(engine, 'collisionStart', handleCollision);
+                
+                Events.on(engine, 'beforeUpdate', () => {
+                    waterParticles.forEach(particle => {
+                        if (particle.label === 'water' && !particle.isBeingRemoved) {
+                            Body.applyForce(particle, particle.position, { x: 0.00015, y: 0 });
+                        }
+                    });
+                });
+                
+                loadLevel();
+            }
+            
+            function handleClick() {
+                if (isWaterFlowing || gameEnded) return;
+                const collisions = Query.collides(digCursor, dirtBlocks);
+                if (collisions.length > 0) {
+                    const blockToRemove = collisions[0].bodyB; 
+                    Composite.remove(engine.world, blockToRemove);
+                    const index = dirtBlocks.indexOf(blockToRemove);
+                    if (index > -1) dirtBlocks.splice(index, 1);
+                }
+            }
+
+            function handleCollision(event) {
+                for (const pair of event.pairs) {
+                    const { bodyA, bodyB } = pair;
+                    if ((bodyA.label === 'water' && bodyB.label === 'plant_pot_sensor') || (bodyB.label === 'water' && bodyA.label === 'plant_pot_sensor')) {
+                        const waterParticle = bodyA.label === 'water' ? bodyA : bodyB;
+                        if (!waterParticle.isBeingRemoved) {
+                             waterParticle.isBeingRemoved = true;
+                             waterInPot++;
+                             Composite.remove(engine.world, waterParticle);
+                             const index = waterParticles.indexOf(waterParticle);
+                             if (index > -1) waterParticles.splice(index, 1);
+                             updateWaterMeter();
+                        }
+                    }
+                }
+            }
+
+            function loadLevel() {
+                Composite.clear(engine.world, false);
+                Composite.add(engine.world, digCursor);
+                dirtBlocks = []; waterInPot = 0; waterParticles = [];
+                isWaterFlowing = false; gameEnded = false; startButton.disabled = false;
+                clearInterval(waterInterval);
+                clearTimeout(faucetStopTimeout);
+                updateWaterMeter();
+
+                const staticBodies = [
+                    Bodies.rectangle(GAME_WIDTH / 2, GAME_HEIGHT + 10, GAME_WIDTH, 20, { isStatic: true, render: { fillStyle: '#654321' } }),
+                    Bodies.rectangle(-10, GAME_HEIGHT / 2, 20, GAME_HEIGHT, { isStatic: true, render: { fillStyle: '#654321' } }),
+                    Bodies.rectangle(GAME_WIDTH + 10, GAME_HEIGHT / 2, 20, GAME_HEIGHT, { isStatic: true, render: { fillStyle: '#654321' } }),
+                    Bodies.rectangle(GAME_WIDTH - 100, GAME_HEIGHT - 80, 120, 40, { isStatic: true, isSensor: true, label: 'plant_pot_sensor' })
+                ];
+                Composite.add(engine.world, staticBodies);
+
+                const TILE_OVERLAP = 1.02;
+
+                for (let y = 3; y < 14; y++) {
+                    for (let x = 0; x < Math.floor(GAME_WIDTH / DIRT_BLOCK_SIZE); x++) {
+                        const tileX = x * DIRT_BLOCK_SIZE + (DIRT_BLOCK_SIZE / 2);
+                        const tileY = y * DIRT_BLOCK_SIZE + 120;
+                        
+                        const isRock = (x > 12 && x < 16 && y > 6 && y < 10) || (Math.random() > 0.94);
+                        const blockKey = isRock ? 'rock_block' : 'dirt_block';
+                        const blockScale = getSpriteScale(blockKey, DIRT_BLOCK_SIZE, DIRT_BLOCK_SIZE);
+                        const block = Bodies.rectangle(
+                            tileX, 
+                            tileY, 
+                            DIRT_BLOCK_SIZE * TILE_OVERLAP, 
+                            DIRT_BLOCK_SIZE * TILE_OVERLAP, 
+                            { 
+                                isStatic: true, 
+                                label: isRock ? 'rock' : 'dirt', 
+                                render: { 
+                                    sprite: { 
+                                        texture: imageAssets[blockKey], 
+                                        xScale: blockScale.x, 
+                                        yScale: blockScale.y 
+                                    } 
+                                } 
+                            }
+                        );
+                        if (!isRock) dirtBlocks.push(block);
+                        Composite.add(engine.world, block);
+                    }
+                }
+                
+                const potVisual = Bodies.rectangle(GAME_WIDTH - 100, GAME_HEIGHT - 60, 120, 80, { 
+                    isStatic: true, 
+                    isSensor: true,
+                    render: { sprite: { texture: imageAssets.plant_pot, xScale: getSpriteScale('plant_pot', 120, 80).x, yScale: getSpriteScale('plant_pot', 120, 80).y } } 
+                });
+                plant = Bodies.rectangle(GAME_WIDTH - 100, GAME_HEIGHT - 140, 100, 120, { 
+                    isStatic: true, 
+                    isSensor: true,
+                    render: { sprite: { texture: imageAssets.plant_wilting, xScale: getSpriteScale('plant_wilting', 100, 120).x, yScale: getSpriteScale('plant_wilting', 100, 120).y } } 
+                });
+                const faucet = Bodies.rectangle(120, 60, 100, 80, { 
+                    isStatic: true, 
+                    isSensor: true,
+                    render: { sprite: { texture: imageAssets.faucet, xScale: getSpriteScale('faucet', 100, 80).x, yScale: getSpriteScale('faucet', 100, 80).y } } 
+                });
+                const stem = Bodies.rectangle(GAME_WIDTH - 100, GAME_HEIGHT - 100, 60, 80, { 
+                    isStatic: true, 
+                    isSensor: true,
+                    render: { sprite: { texture: imageAssets.plant_stem, xScale: getSpriteScale('plant_stem', 60, 80).x, yScale: getSpriteScale('plant_stem', 60, 80).y } } 
+                });
+                Composite.add(engine.world, [potVisual, stem, plant, faucet]);
+            }
+
+            function startWaterFlow() {
+                if (gameEnded || isWaterFlowing) return;
+                isWaterFlowing = true;
+                startButton.disabled = true;
+                let particlesCreated = 0;
+
+                waterInterval = setInterval(() => {
+                    const particlesPerTick = 3;
+                    for (let i = 0; i < particlesPerTick; i++) {
+                        if (particlesCreated >= TOTAL_WATER_PARTICLES) {
+                            clearInterval(waterInterval);
+                            return;
+                        }
+                        
+                        const particle = Bodies.circle(
+                            120 + Math.random() * 15 - 7.5,
+                            100, 
+                            3.5 + Math.random() * 1.0,
+                            { 
+                                restitution: 0.1,   
+                                friction: 0.4,      
+                                frictionStatic: 0.6,
+                                frictionAir: 0.001, 
+                                slop: 0.1,          
+                                density: 0.008,     
+                                label: 'water', 
+                                render: { fillStyle: '#4285F4' } 
+                            }
+                        );
+                        
+                        waterParticles.push(particle);
+                        Composite.add(engine.world, particle);
+                        particlesCreated++;
+                    }
+                }, 15);
+
+                faucetStopTimeout = setTimeout(() => {
+                    clearInterval(waterInterval);
+                    isWaterFlowing = false;
+                    setTimeout(checkEndCondition, 6000); 
+                }, 10000); // 10 seconds
+            }
+
+            function updateWaterMeter() {
+                const percentage = Math.min(100, (waterInPot / (TOTAL_WATER_PARTICLES * 0.6)) * 100);
+                waterLevelBar.style.height = `${percentage}%`;
+                if (gameEnded || !plant) return;
+                let newTextureKey = 'plant_wilting';
+
+                // --- THIS IS THE LOGIC FOR THE DROWNING SPRITE ---
+                if (percentage > OVERWATER_LIMIT) {
+                    newTextureKey = 'plant_drowning'; // If over 90%, use the drowning sprite
+                } else if (percentage >= WATER_GOAL_MIN) {
+                    newTextureKey = 'plant_healthy'; // Otherwise, use healthy if in the goal range
+                }
+                // --- END OF LOGIC ---
+
+                plant.render.sprite.texture = imageAssets[newTextureKey];
+                const newScale = getSpriteScale(newTextureKey, 100, 120);
+                plant.render.sprite.xScale = newScale.x;
+                plant.render.sprite.yScale = newScale.y;
+            }
+
+            function checkEndCondition() {
+                if (gameEnded) return;
+                const percentage = (waterInPot / (TOTAL_WATER_PARTICLES * 0.6)) * 100;
+                endGame(percentage >= WATER_GOAL_MIN && percentage <= WATER_GOAL_MAX);
+            }
+
+            function endGame(isWin) {
+                gameEnded = true; 
+                isWaterFlowing = false; 
+                clearInterval(waterInterval);
+                clearTimeout(faucetStopTimeout);
+                messageContainer.classList.remove('hidden');
+                if (isWin) {
+                    messageTitle.innerText = 'Success! 🌱';
+                    messageText.innerText = 'Perfect irrigation!';
+                } else {
+                    const percentage = (waterInPot / (TOTAL_WATER_PARTICLES * 0.6)) * 100;
+                    messageTitle.innerText = 'Try Again! 💧';
+                    messageText.innerText = percentage > WATER_GOAL_MAX ? 'Over-irrigated!' : 'Under-irrigated!';
+                }
+            }
+
+            startButton.addEventListener('click', startWaterFlow);
+            resetButton.addEventListener('click', () => { messageContainer.classList.add('hidden'); loadLevel(); });
+            nextLevelButton.addEventListener('click', () => { messageContainer.classList.add('hidden'); loadLevel(); });
+
+            preloadImages(setup);
+        });
+    </script>
+</body>
+</html>
